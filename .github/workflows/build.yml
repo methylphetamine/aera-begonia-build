@@ -119,7 +119,7 @@ jobs:
           mkdir -p "$SRC_DIR"
           cd "$SRC_DIR"
           repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH"
-          repo sync -c --force-sync --no-clone-bundle --no-tags --depth=1 -j${{ inputs.jobs || '4' }}
+          repo sync -c --force-sync --no-clone-bundle --no-tags -j${{ inputs.jobs || '4' }}
 
       - name: Trim disk before build
         run: |
@@ -143,7 +143,7 @@ jobs:
           BUILD_JOBS: ${{ inputs.jobs || '4' }}
           MAKEFILE_NAME: ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}
           BUILD_TARGET: ${{ inputs.build_target || 'adbd recoveryimage' }}
-          BUILD_USERNAME: methylamphetamine
+          BUILD_USERNAME: methylphetamine
           BUILD_HOSTNAME: poxproject
           AERA_BUILD_DEVICE: begonia
           AERA_BUILD_STATUS: Unofficial
