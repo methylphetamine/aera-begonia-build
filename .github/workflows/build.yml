@@ -66,11 +66,22 @@ jobs:
 
       - name: Free disk space
         run: |
+          # The AOSP 16 sync needs every byte it can get: a full checkout plus
+          # .repo used to fill the runner's disk at ~30 min into the sync, so
+          # the job died with "No space left on device" before compiling.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                    "$AGENT_TOOLSDIRECTORY/CodeQL" \
-                    "$AGENT_TOOLSDIRECTORY/Python" \
-                    /usr/local/share/boost \
-                    /opt/hostedtoolcache/CodeQL || true
+                    /opt/hostedtoolcache \
+                    /usr/local/share/boost /usr/share/swift /opt/microsoft \
+                    /usr/local/.ghcup /usr/local/share/powershell \
+                    /usr/local/aws-cli /usr/local/aws-sam-cli /usr/lib/mono \
+                    /usr/share/java /opt/google /usr/local/julia* \
+                    /usr/local/share/chromium /usr/local/share/vcpkg || true
+          sudo docker system prune -af --volumes 2>/dev/null || true
+          sudo rm -rf /var/lib/docker/* 2>/dev/null || true
+          # No swap file yet; it is created after the sync so it does not
+          # compete with the checkout for disk space.
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile 2>/dev/null || true
           df -h /
 
       - name: Install build dependencies
@@ -87,14 +98,54 @@ jobs:
 
       - name: Set JDK 17
         run: |
-          if [ -d "$JAVA_HOME_17_X64" ]; then
-            echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
-            echo "Using preinstalled JDK 17 at $JAVA_HOME_17_X64"
+          if [ -n "$JAVA_HOME_17_X64" ] && [ -x "$JAVA_HOME_17_X64/bin/java" ]; then
+            J="$JAVA_HOME_17_X64"
+          elif [ -x /usr/lib/jvm/java-17-openjdk-amd64/bin/java ]; then
+            # The hosted toolcache was removed by the disk-space step.
+            J=/usr/lib/jvm/java-17-openjdk-amd64
           else
-            echo "JDK 17 not preinstalled; relying on openjdk-17-jdk-headless"
+            J=$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")
           fi
-          echo "JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
-          "$JAVA_HOME/bin/java" -version 2>&1
+          echo "JAVA_HOME=$J" >> "$GITHUB_ENV"
+          "$J/bin/java" -version 2>&1
+
+      - name: Install repo launcher
+        run: |
+          mkdir -p ~/.bin
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/.bin/repo
+          chmod a+x ~/.bin/repo
+          echo "$HOME/.bin" >> "$GITHUB_PATH"
+
+      - name: Sync AERA source
+        run: |
+          set -e
+          mkdir -p "$SRC_DIR"
+          cd "$SRC_DIR"
+          df -h /
+          # Partial clone keeps .repo small: blobs are fetched on checkout
+          # instead of holding a second full copy of the tree during sync.
+          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --partial-clone
+          repo sync -c --force-sync --no-clone-bundle --no-tags -j${{ inputs.jobs || '4' }}
+          df -h /
+
+      - name: Trim disk before build
+        run: |
+          du -sh "$SRC_DIR" 2>/dev/null || true
+          find "$SRC_DIR/prebuilts" -maxdepth 6 -type d -name .git -prune -exec rm -rf {} + 2>/dev/null || true
+          find "$SRC_DIR/.repo/project-objects" -type d -name '*.git' -prune -exec rm -rf {} + 2>/dev/null || true
+          df -h /
+
+      - name: Add swap
+        run: |
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /swapfile 2>/dev/null || true
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          swapon --show
+          free -h
+          df -h /
 
       - name: Restore ccache
         if: ${{ (inputs.ccache || 'true') == 'true' }}
@@ -111,40 +162,6 @@ jobs:
           mkdir -p "$CCACHE_DIR"
           ccache -M 6G
           ccache --zero-stats || true
-
-      - name: Add swap
-        run: |
-          sudo timeout 120 swapoff -a || true
-          sudo rm -f /swapfile
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          swapon --show
-          free -h
-
-      - name: Install repo launcher
-        run: |
-          mkdir -p ~/.bin
-          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o ~/.bin/repo
-          chmod a+x ~/.bin/repo
-          echo "$HOME/.bin" >> "$GITHUB_PATH"
-
-      - name: Sync AERA source
-        run: |
-          set -e
-          mkdir -p "$SRC_DIR"
-          cd "$SRC_DIR"
-          repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH"
-          repo sync -c --force-sync --no-clone-bundle --no-tags -j${{ inputs.jobs || '4' }}
-
-      - name: Trim disk before build
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
-          du -sh "$SRC_DIR" 2>/dev/null || true
-          find "$SRC_DIR/prebuilts" -maxdepth 6 -type d -name .git -prune -exec rm -rf {} + 2>/dev/null || true
-          find "$SRC_DIR/.repo/project-objects" -type d -name '*.git' -prune -exec rm -rf {} + 2>/dev/null || true
-          df -h /
 
       - name: Install device tree
         run: |
