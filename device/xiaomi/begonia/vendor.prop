@@ -1,0 +1,6 @@
+# Crypto
+# These are only defaults for adoptable/volume encryption.  Internal /data is
+# decrypted from the installed ROM's own fstab plus the actual policy on
+# /data/misc, so keep the stock filename mode here instead of forcing either
+# FBE generation globally.
+ro.crypto.volume.filenames_mode=aes-256-cts

@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>FoxWeb &middot; begonia recovery</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">OF</div>
+    <div>
+      <h1>FoxWeb</h1>
+      <p>OrangeFox recovery &middot; begonia</p>
+    </div>
+  </div>
+  <div id="statusPill" class="pill off">
+    <span class="dot"></span>
+    <span id="statusText">Checking&hellip;</span>
+  </div>
+</header>
+
+<main>
+  <section class="card hero">
+    <div class="hero-copy">
+      <p class="eyebrow">WiFi status</p>
+      <h2 id="ssid">Not connected</h2>
+      <p id="detail" class="muted">Starting the WiFi stack&hellip;</p>
+      <div class="actions">
+        <button id="btnScan" class="primary">Scan networks</button>
+        <button id="btnWifi" class="ghost">Start WiFi</button>
+        <button id="btnDisconnect" class="ghost danger">Disconnect</button>
+      </div>
+    </div>
+    <div class="metrics">
+      <div><span>IP address</span><strong id="ip">&mdash;</strong></div>
+      <div><span>MAC address</span><strong id="mac">&mdash;</strong></div>
+      <div><span>Link state</span><strong id="state">&mdash;</strong></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Nearby</p>
+        <h2>Networks</h2>
+      </div>
+      <button id="btnRescan" class="ghost small">Refresh</button>
+    </div>
+    <p id="scanState" class="muted small">Scan to look for networks.</p>
+    <ul id="networks" class="networks"></ul>
+  </section>
+
+  <section class="card">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Manual</p>
+        <h2>Join a hidden network</h2>
+      </div>
+    </div>
+    <form id="manualForm" class="form">
+      <label>Network name
+        <input id="manualSsid" autocomplete="off" maxlength="32" required>
+      </label>
+      <label>Password
+        <input id="manualPsk" type="password" autocomplete="off" maxlength="64" placeholder="Leave empty for open networks">
+      </label>
+      <label class="check"><input id="manualRemember" type="checkbox"> Remember this network on /sdcard</label>
+      <button class="primary" type="submit">Connect</button>
+    </form>
+  </section>
+
+  <section class="card" id="adbCard">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Debug bridge</p>
+        <h2>ADB over WiFi</h2>
+      </div>
+      <span id="adbPill" class="pill off">
+        <span class="dot"></span>
+        <span id="adbState">Checking&hellip;</span>
+      </span>
+    </div>
+    <p id="adbDetail" class="muted small">Enable adbd's TCP listener on port 5555. USB ADB keeps working independently.</p>
+
+    <div class="adb-controls">
+      <div class="metrics">
+        <div><span>Endpoint</span><strong id="adbAddress">&mdash;</strong></div>
+        <div><span>Port</span><strong id="adbPort">5555</strong></div>
+        <div><span>Command</span><strong id="adbCommand">&mdash;</strong></div>
+      </div>
+      <div class="actions">
+        <button id="btnAdb" class="primary">Enable ADB over WiFi</button>
+        <button id="btnAdbRefresh" class="ghost">Refresh</button>
+      </div>
+    </div>
+
+    <div class="qr-grid">
+      <div class="qr-block">
+        <p class="eyebrow">FoxWeb dashboard</p>
+        <div id="webQr" class="qr-code">
+          <p class="muted small">Connect WiFi to generate a one-click QR code.</p>
+        </div>
+        <a id="webQrLink" class="url-link" href="#" target="_blank" rel="noopener">&mdash;</a>
+        <button id="btnCopyWeb" class="ghost small" type="button">Copy link</button>
+        <p id="webQrHint" class="muted small">Scan with a phone on the same network.</p>
+      </div>
+      <div class="qr-block">
+        <p class="eyebrow">ADB over WiFi</p>
+        <div id="adbQr" class="qr-code">
+          <p class="muted small">Enable ADB over WiFi to show the connect QR code.</p>
+        </div>
+        <p id="adbQrHint" class="muted small">The QR code contains the full <code>adb connect</code> command.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="filesCard">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Storage</p>
+        <h2>Files &amp; backups</h2>
+      </div>
+      <div class="file-actions">
+        <button id="btnMkdir" class="ghost small" type="button">New folder</button>
+        <button id="btnUpload" class="ghost small" type="button">Upload</button>
+        <input id="fileUpload" type="file" multiple hidden>
+        <button id="btnFilesRefresh" class="ghost small" type="button">Refresh</button>
+      </div>
+    </div>
+
+    <div id="fileRoots" class="quick-links">
+      <button data-path="/sdcard" class="active" type="button">Internal storage</button>
+      <button data-path="/sdcard/TWRP/BACKUPS" type="button">TWRP backups</button>
+      <button data-path="/sdcard/Fox" type="button">Fox folder</button>
+      <button data-path="/tmp" type="button">/tmp</button>
+    </div>
+
+    <div class="file-toolbar">
+      <button id="btnUp" class="ghost small" type="button">&larr; Up</button>
+      <nav id="breadcrumb" class="breadcrumb" aria-label="Current folder"></nav>
+    </div>
+
+    <p id="filesState" class="muted small">Enter the access token, then open a folder.</p>
+    <ul id="fileList" class="file-list hidden"></ul>
+    <p class="muted small">
+      Downloads and SHA-256 checks are streamed by recovery. Uploads are limited to 8&nbsp;GiB
+      and need the access token. Deleting a folder removes everything inside it.
+    </p>
+  </section>
+
+  <section class="card">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Power</p>
+        <h2>Recovery actions</h2>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="ghost" data-reboot="recovery">Reboot recovery</button>
+      <button class="ghost" data-reboot="system">Reboot system</button>
+      <button class="ghost" data-reboot="bootloader">Bootloader</button>
+    </div>
+    <p class="muted small">These actions need the access token. You can also power off the device from the recovery UI.</p>
+  </section>
+
+  <section class="card">
+    <div class="section-head">
+      <div>
+        <p class="eyebrow">Diagnostics</p>
+        <h2>Log</h2>
+      </div>
+      <button id="btnLog" class="ghost small">Show</button>
+    </div>
+    <pre id="log" class="log hidden"></pre>
+  </section>
+</main>
+
+<footer>
+  FoxWeb runs entirely on this device. No cloud, no telemetry.
+</footer>
+
+<div id="toast" class="toast hidden" role="status"></div>
+
+<dialog id="connectDialog">
+  <form method="dialog" id="connectForm">
+    <h2 id="dialogTitle">Connect</h2>
+    <p id="dialogSub" class="muted small"></p>
+    <label>Password
+      <input id="dialogPsk" type="password" autocomplete="off" maxlength="64">
+    </label>
+    <label class="check"><input id="dialogRemember" type="checkbox"> Remember this network on /sdcard</label>
+    <div class="actions">
+      <button value="cancel" class="ghost" formnovalidate>Cancel</button>
+      <button id="dialogConnect" value="connect" class="primary">Connect</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="tokenDialog">
+  <form method="dialog" id="tokenForm">
+    <h2>Access token</h2>
+    <p class="muted small">Run <code>foxweb token</code> in the recovery terminal, or open the one-click URL printed by <code>foxweb status</code>.</p>
+    <label>Token
+      <input id="tokenInput" autocomplete="off">
+    </label>
+    <div class="actions">
+      <button value="cancel" class="ghost" formnovalidate>Cancel</button>
+      <button value="save" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="qrcode.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

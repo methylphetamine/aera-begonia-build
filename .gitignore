@@ -1,0 +1,5 @@
+# AOSP output
+aosp/out
+aosp/.repo
+# ccache
+.ccache
