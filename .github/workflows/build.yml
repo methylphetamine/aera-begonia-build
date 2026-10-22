@@ -184,6 +184,91 @@ jobs:
             ${{ env.SRC_DIR }}/out/target/product/begonia/*.zip
           if-no-files-found: warn
 
+      - name: Upload to Gofile
+        id: gofile
+        if: success()
+        continue-on-error: true
+        run: |
+          IMG="$SRC_DIR/out/target/product/begonia/recovery.img"
+          if [ ! -f "$IMG" ]; then
+            echo "::warning::recovery.img not found; skipping Gofile upload"
+            exit 0
+          fi
+          SHA=$(sha256sum "$IMG" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "$IMG")
+          echo "recovery_sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "recovery_size=$SIZE" >> "$GITHUB_OUTPUT"
+          echo "recovery.img SHA256: $SHA ($SIZE bytes)"
+          SRV=$(curl -fsSL https://api.gofile.io/servers | jq -r '.data.servers[0].name // empty')
+          if [ -z "$SRV" ]; then
+            echo "::warning::Gofile returned no upload server"
+            exit 0
+          fi
+          HTTP=$(curl -sS -o /tmp/gofile.json -w '%{http_code}' \
+            -F "file=@${IMG}" "https://${SRV}.gofile.io/contents/uploadfile" || true)
+          URL=$(jq -r '.data.downloadPage // empty' /tmp/gofile.json 2>/dev/null || true)
+          if [ "$HTTP" != "200" ] || [ -z "$URL" ]; then
+            echo "::warning::Gofile upload failed (HTTP ${HTTP:-?})"
+            cat /tmp/gofile.json 2>/dev/null || true
+            exit 0
+          fi
+          echo "gofile_url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Gofile: $URL (recovery.img)"
+
+      - name: Notify Telegram on success
+        if: success()
+        continue-on-error: true
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_CHAT_2: ${{ secrets.TELEGRAM_CHAT_ID_2 }}
+          GOFILE_URL: ${{ steps.gofile.outputs.gofile_url }}
+          SHA: ${{ steps.gofile.outputs.recovery_sha256 }}
+          SIZE: ${{ steps.gofile.outputs.recovery_size }}
+        run: |
+          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not configured"
+            exit 0
+          fi
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          TEXT=$(printf 'AERA begonia build finished\nrecovery.img SHA256: %s\nsize: %s bytes\nGofile: %s\nRun: %s' \
+            "${SHA:-n/a}" "${SIZE:-?}" "${GOFILE_URL:-n/a}" "$RUN_URL")
+          for CHAT in "$TG_CHAT" "$TG_CHAT_2"; do
+            [ -z "$CHAT" ] && continue
+            curl -sS -o /tmp/tg.json \
+              --data-urlencode "chat_id=${CHAT}" \
+              --data-urlencode "text=${TEXT}" \
+              "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" || true
+            jq -e '.ok == true' /tmp/tg.json >/dev/null 2>&1 \
+              && echo "Telegram: success message sent to $CHAT" \
+              || echo "::warning::Telegram success message failed for $CHAT"
+          done
+
+      - name: Notify Telegram on failure
+        if: failure()
+        continue-on-error: true
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_CHAT_2: ${{ secrets.TELEGRAM_CHAT_ID_2 }}
+        run: |
+          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; then exit 0; fi
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          JOB=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" \
+            | jq -r '.jobs[0].steps[]?|select(.conclusion=="failure")|.name' | head -1)
+          TEXT=$(printf 'AERA begonia build FAILED at step: %s\nRun: %s' "${JOB:-unknown}" "$RUN_URL")
+          for CHAT in "$TG_CHAT" "$TG_CHAT_2"; do
+            [ -z "$CHAT" ] && continue
+            curl -sS -o /tmp/tg.json \
+              --data-urlencode "chat_id=${CHAT}" \
+              --data-urlencode "text=${TEXT}" \
+              "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" || true
+            jq -e '.ok == true' /tmp/tg.json >/dev/null 2>&1 \
+              && echo "Telegram: failure message sent to $CHAT" \
+              || echo "::warning::Telegram failure message failed for $CHAT"
+          done
+
       - name: Create GitHub release
         if: github.event.inputs.publish_release == 'true' || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
