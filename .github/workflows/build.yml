@@ -195,7 +195,7 @@ jobs:
           BUILD_JOBS: ${{ inputs.jobs || '4' }}
           MAKEFILE_NAME: ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}
           BUILD_TARGET: ${{ inputs.build_target || 'adbd recoveryimage' }}
-          BUILD_USERNAME: A X
+          BUILD_USERNAME: A_X
           BUILD_HOSTNAME: poxproject
           AERA_BUILD_DEVICE: begonia
           AERA_BUILD_STATUS: Unofficial
