@@ -40,6 +40,7 @@ env:
   MANIFEST_BRANCH: ${{ github.event.inputs.manifest_branch || 'aera-16.0' }}
   SRC_DIR: 'aosp'
   CCACHE_DIR: '${{ github.workspace }}/.ccache'
+  CCACHE_EXEC: '/usr/bin/ccache'
 
 jobs:
   build:
@@ -94,6 +95,22 @@ jobs:
           fi
           echo "JAVA_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
           "$JAVA_HOME/bin/java" -version 2>&1
+
+      - name: Restore ccache
+        if: ${{ (inputs.ccache || 'true') == 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-aera-begonia-${{ github.run_id }}
+          restore-keys: |
+            ccache-aera-begonia-
+
+      - name: ccache configuration
+        if: ${{ (inputs.ccache || 'true') == 'true' }}
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          ccache -M 6G
+          ccache --zero-stats || true
 
       - name: Add swap
         run: |
@@ -165,6 +182,10 @@ jobs:
           fi
           lunch "$MAKEFILE_NAME"
           mka -j"$BUILD_JOBS" $BUILD_TARGET 2>&1 | tee -a build.log
+
+      - name: ccache stats
+        if: always()
+        run: ccache -s || true
 
       - name: Upload build log
         if: always()
