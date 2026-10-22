@@ -4,7 +4,7 @@
 
 $(call inherit-product-if-exists, $(LOCAL_PATH)/fox_begonia.mk)
 
-AERA_MAINTAINER := methylamphetamine
+AERA_MAINTAINER := methylphetamine
 AERA_SCREEN_H := 2340
 AERA_STATUS_H := 80
 AERA_HIDE_NOTCH := 1
