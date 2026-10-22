@@ -125,21 +125,17 @@ jobs:
           # Partial clone keeps .repo small: blobs are fetched on checkout
           # instead of holding a second full copy of the tree during sync.
           repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --partial-clone
-          # Recovery does not build CTS, the SDK, the emulator test suites or
-          # the kernel prebuilts (begonia uses a prebuilt Image.gz). Dropping
-          # them before sync saves several GB of runner disk.
+          # Recovery does not build CTS, the SDK or the kernel prebuilts
+          # (begonia uses a prebuilt Image.gz). Dropping them before sync saves
+          # several GB. Do NOT drop test/*: test/app_compat/csuite defines the
+          # csuite_test module type that other Android.bp files reference, and
+          # dropping it breaks soong bootstrap.
           mkdir -p .repo/local_manifests
           cat > .repo/local_manifests/no-extra.xml <<'XML'
           <manifest>
             <remove-project path="cts" />
             <remove-project path="sdk" />
             <remove-project path="development" />
-            <remove-project path="test/dittosuite" />
-            <remove-project path="test/robolectric-extensions" />
-            <remove-project path="test/app_compat/csuite" />
-            <remove-project path="test/suite_harness" />
-            <remove-project path="test/vts" />
-            <remove-project path="test/vts-testcase/hal" />
             <remove-project path="kernel/prebuilts/6.1/arm64" />
             <remove-project path="kernel/prebuilts/6.6/arm64" />
             <remove-project path="kernel/prebuilts/6.12/arm64" />
