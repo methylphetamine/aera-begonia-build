@@ -16,9 +16,9 @@ on:
         required: false
         default: 'aera-16.0'
       jobs:
-        description: 'Parallel make jobs'
+        description: 'Parallel make jobs (2 is the safe maximum on a 16 GB hosted runner)'
         required: false
-        default: '4'
+        default: '2'
       ccache:
         description: 'Use ccache (true/false)'
         required: false
@@ -59,7 +59,7 @@ jobs:
           echo "manifest   : $MANIFEST_URL @ $MANIFEST_BRANCH"
           echo "lunch      : ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}"
           echo "target     : ${{ inputs.build_target || 'adbd recoveryimage' }}"
-          echo "jobs       : ${{ inputs.jobs || '4' }}"
+          echo "jobs       : ${{ inputs.jobs || '2' }}"
           echo "ccache     : ${{ inputs.ccache || 'true' }}"
           echo "free space before:"
           df -h /
@@ -143,7 +143,7 @@ jobs:
             <remove-project path="kernel/prebuilts/common-modules/trusty/6.12/arm64" />
           </manifest>
           XML
-          repo sync -c --force-sync --no-clone-bundle --no-tags -j${{ inputs.jobs || '4' }}
+          repo sync -c --force-sync --no-clone-bundle --no-tags -j${{ inputs.jobs || '2' }}
           df -h /
 
       - name: Trim disk before build
@@ -153,7 +153,7 @@ jobs:
           find "$SRC_DIR/.repo/project-objects" -type d -name '*.git' -prune -exec rm -rf {} + 2>/dev/null || true
           df -h /
 
-      - name: Add swap
+      - name: Add swap and tune memory pressure
         run: |
           sudo swapoff -a 2>/dev/null || true
           sudo rm -f /swapfile 2>/dev/null || true
@@ -161,6 +161,12 @@ jobs:
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+          # AOSP 16 with four compilers on 16 GB RAM + 16 GB disk swap
+          # thrashes so hard that the runner stops answering GitHub and the
+          # job dies with exit 143 ("runner has received a shutdown signal")
+          # with no compiler error.  Prefer dropping caches/RSS over swap.
+          sudo sysctl -w vm.swappiness=10 || true
+          sudo sysctl -w vm.vfs_cache_pressure=50 || true
           swapon --show
           free -h
           df -h /
@@ -178,7 +184,7 @@ jobs:
         if: ${{ (inputs.ccache || 'true') == 'true' }}
         run: |
           mkdir -p "$CCACHE_DIR"
-          ccache -M 6G
+          ccache -M 4G
           ccache --zero-stats || true
 
       - name: Install device tree
@@ -192,7 +198,7 @@ jobs:
         env:
           USE_CCACHE: ${{ inputs.ccache || 'true' }}
           ALLOW_MISSING_DEPENDENCIES: 'true'
-          BUILD_JOBS: ${{ inputs.jobs || '4' }}
+          BUILD_JOBS: ${{ inputs.jobs || '2' }}
           MAKEFILE_NAME: ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}
           BUILD_TARGET: ${{ inputs.build_target || 'adbd recoveryimage' }}
           BUILD_USERNAME: A_X
@@ -205,6 +211,30 @@ jobs:
           cd "$SRC_DIR"
           set -o pipefail
           : > build.log
+
+          # Optional memory/disk sampler: when the runner dies silently this
+          # file is the only evidence of what happened just before.
+          ( while :; do
+              echo "=== $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
+              free -h
+              df -h "$SRC_DIR" / 2>/dev/null
+              ps -eo pid,rss,pcpu,comm --sort=-rss | head -8
+              dmesg -T 2>/dev/null | tail -20
+              sleep 60
+            done ) > monitor.log 2>&1 &
+          MON_PID=$!
+          echo "monitor pid $MON_PID -> $SRC_DIR/monitor.log"
+
+          # Never run more than two compilers on the 16 GB hosted runner.  A
+          # dispatch with jobs=4 still succeeds, it is just clamped here.
+          JOBS="$BUILD_JOBS"
+          case "$JOBS" in ''|*[!0-9]*) JOBS=2 ;; esac
+          if [ "$JOBS" -gt 2 ]; then
+            echo "clamping -j$JOBS to -j2: 16 GB runner OOM/thrash safeguard"
+            JOBS=2
+          fi
+          echo "make jobs: $JOBS"
+
           set +e
           source build/envsetup.sh >> build.log 2>&1
           ENVSETUP_RC=$?
@@ -213,10 +243,15 @@ jobs:
           tail -n 20 build.log || true
           if [ -z "$ANDROID_BUILD_TOP" ]; then
             echo "::error::envsetup did not initialise ANDROID_BUILD_TOP"
+            kill "$MON_PID" 2>/dev/null || true
             exit 1
           fi
           lunch "$MAKEFILE_NAME"
-          mka -j"$BUILD_JOBS" $BUILD_TARGET 2>&1 | tee -a build.log
+          set +e
+          mka -j"$JOBS" $BUILD_TARGET 2>&1 | tee -a build.log
+          RC=${PIPESTATUS[0]}
+          kill "$MON_PID" 2>/dev/null || true
+          exit "$RC"
 
       - name: ccache stats
         if: always()
@@ -227,7 +262,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: aera-begonia-build-log
-          path: ${{ env.SRC_DIR }}/build.log
+          path: |
+            ${{ env.SRC_DIR }}/build.log
+            ${{ env.SRC_DIR }}/monitor.log
           if-no-files-found: ignore
 
       - name: Upload recovery image
