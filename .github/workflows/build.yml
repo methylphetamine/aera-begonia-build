@@ -235,9 +235,13 @@ jobs:
           USE_CCACHE: ${{ inputs.ccache || 'true' }}
           ALLOW_MISSING_DEPENDENCIES: 'true'
           MALLOC_ARENA_MAX: '2'
-          GOGC: '20'
-          GOMEMLIMIT: '8GiB'
-          GOMAXPROCS: '2'
+          # soong_build is the memory peak.  Keep its Go heap well below the
+          # runner's 16 GB and run its Go runtime single-threaded; the C++
+          # compilers still use -j2.  A hard 12 GiB limit previously let the
+          # runner enter swap death before GitHub shut it down.
+          GOGC: '10'
+          GOMEMLIMIT: '6GiB'
+          GOMAXPROCS: '1'
           BUILD_JOBS: ${{ inputs.jobs || '2' }}
           MAKEFILE_NAME: ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}
           BUILD_TARGET: ${{ inputs.build_target || 'adbd recoveryimage' }}
