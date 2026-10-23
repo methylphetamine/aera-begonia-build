@@ -157,6 +157,14 @@ jobs:
         run: |
           sudo swapoff -a 2>/dev/null || true
           sudo rm -f /swapfile 2>/dev/null || true
+          # Ubuntu's systemd-oomd kills the whole runner cgroup when memory
+          # pressure crosses its threshold.  AOSP's Kati phase can briefly use
+          # most of the 16 GB, and the result is exit 143 with no compiler
+          # error.  Let the kernel OOM killer pick a compiler instead.
+          sudo systemctl stop systemd-oomd systemd-oomd.socket 2>/dev/null || true
+          sudo systemctl disable systemd-oomd systemd-oomd.socket 2>/dev/null || true
+          sudo systemctl stop earlyoom 2>/dev/null || true
+          echo "oomd: $(systemctl is-active systemd-oomd 2>/dev/null || echo absent)"
           sudo fallocate -l 16G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
@@ -198,6 +206,7 @@ jobs:
         env:
           USE_CCACHE: ${{ inputs.ccache || 'true' }}
           ALLOW_MISSING_DEPENDENCIES: 'true'
+          MALLOC_ARENA_MAX: '2'
           BUILD_JOBS: ${{ inputs.jobs || '2' }}
           MAKEFILE_NAME: ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}
           BUILD_TARGET: ${{ inputs.build_target || 'adbd recoveryimage' }}
@@ -212,18 +221,22 @@ jobs:
           set -o pipefail
           : > build.log
 
-          # Optional memory/disk sampler: when the runner dies silently this
-          # file is the only evidence of what happened just before.
+          # Memory/disk sampler.  Stream it into the job log as well as
+          # monitor.log so the last state survives a runner shutdown.
+          : > monitor.log
           ( while :; do
               echo "=== $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
               free -h
+              cat /proc/pressure/memory 2>/dev/null || true
               df -h "$SRC_DIR" / 2>/dev/null
-              ps -eo pid,rss,pcpu,comm --sort=-rss | head -8
+              ps -eo pid,rss,pcpu,comm --sort=-rss | head -12
               dmesg -T 2>/dev/null | tail -20
-              sleep 60
+              sleep 30
             done ) > monitor.log 2>&1 &
           MON_PID=$!
-          echo "monitor pid $MON_PID -> $SRC_DIR/monitor.log"
+          stdbuf -oL -eL tail -n +1 -f monitor.log &
+          TAIL_PID=$!
+          echo "monitor pid $MON_PID, tail pid $TAIL_PID -> $SRC_DIR/monitor.log"
 
           # Never run more than two compilers on the 16 GB hosted runner.  A
           # dispatch with jobs=4 still succeeds, it is just clamped here.
@@ -243,14 +256,14 @@ jobs:
           tail -n 20 build.log || true
           if [ -z "$ANDROID_BUILD_TOP" ]; then
             echo "::error::envsetup did not initialise ANDROID_BUILD_TOP"
-            kill "$MON_PID" 2>/dev/null || true
+            kill "$MON_PID" "$TAIL_PID" 2>/dev/null || true
             exit 1
           fi
           lunch "$MAKEFILE_NAME"
           set +e
           mka -j"$JOBS" $BUILD_TARGET 2>&1 | tee -a build.log
           RC=${PIPESTATUS[0]}
-          kill "$MON_PID" 2>/dev/null || true
+          kill "$MON_PID" "$TAIL_PID" 2>/dev/null || true
           exit "$RC"
 
       - name: ccache stats
