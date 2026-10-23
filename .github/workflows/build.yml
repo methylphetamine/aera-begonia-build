@@ -125,12 +125,22 @@ jobs:
           # Partial clone keeps .repo small: blobs are fetched on checkout
           # instead of holding a second full copy of the tree during sync.
           repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --partial-clone
+          # AERA ships remove-minimal.xml for recovery builds, but it is not
+          # included by default.  Without it repo syncs the full ~989-project
+          # AOSP tree and soong_build needs more memory than the 16 GB runner
+          # has.  Copy it into local_manifests so repo applies the removals
+          # after default.xml/twrp-default.xml.
+          mkdir -p .repo/local_manifests
+          if [ ! -f .repo/manifests/remove-minimal.xml ]; then
+            echo "::error::AERA remove-minimal.xml was not found after repo init"
+            exit 1
+          fi
+          cp .repo/manifests/remove-minimal.xml .repo/local_manifests/remove-minimal.xml
           # Recovery does not build CTS, the SDK or the kernel prebuilts
           # (begonia uses a prebuilt Image.gz). Dropping them before sync saves
           # several GB. Do NOT drop test/*: test/app_compat/csuite defines the
           # csuite_test module type that other Android.bp files reference, and
           # dropping it breaks soong bootstrap.
-          mkdir -p .repo/local_manifests
           cat > .repo/local_manifests/no-extra.xml <<'XML'
           <manifest>
             <remove-project path="cts" />
@@ -165,15 +175,38 @@ jobs:
           sudo systemctl disable systemd-oomd systemd-oomd.socket 2>/dev/null || true
           sudo systemctl stop earlyoom 2>/dev/null || true
           echo "oomd: $(systemctl is-active systemd-oomd 2>/dev/null || echo absent)"
-          sudo fallocate -l 16G /swapfile
+
+          # Disk swap thrashes badly when soong_build approaches the RAM limit.
+          # Add compressed RAM swap (zram) as the preferred swap device so the
+          # kernel can reclaim anonymous pages without waiting on the runner's
+          # disk.  Keep a smaller disk swap file as a fallback.
+          ZRAM=0
+          if sudo modprobe zram 2>/dev/null && [ -b /dev/zram0 ]; then
+            sudo swapoff /dev/zram0 2>/dev/null || true
+            echo 1 | sudo tee /sys/block/zram0/reset >/dev/null 2>&1 || true
+            echo lz4 | sudo tee /sys/block/zram0/comp_algorithm >/dev/null 2>&1 || true
+            echo 8G | sudo tee /sys/block/zram0/disksize >/dev/null 2>&1 || true
+            if sudo mkswap /dev/zram0 >/dev/null 2>&1 && sudo swapon -p 100 /dev/zram0; then
+              ZRAM=1
+              echo "zram swap enabled: 8G, priority 100"
+            fi
+          fi
+          if [ "$ZRAM" -eq 0 ]; then
+            echo "::warning::zram is unavailable; falling back to disk swap only"
+          fi
+
+          sudo fallocate -l 8G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
-          sudo swapon /swapfile
-          # AOSP 16 with four compilers on 16 GB RAM + 16 GB disk swap
-          # thrashes so hard that the runner stops answering GitHub and the
-          # job dies with exit 143 ("runner has received a shutdown signal")
-          # with no compiler error.  Prefer dropping caches/RSS over swap.
-          sudo sysctl -w vm.swappiness=10 || true
+          sudo swapon -p 10 /swapfile
+          # With zram, anonymous pages can be compressed in RAM instead of
+          # thrashing the disk.  Without it, stay conservative and prefer
+          # dropping caches over swap.
+          if [ "$ZRAM" -eq 1 ]; then
+            sudo sysctl -w vm.swappiness=100 || true
+          else
+            sudo sysctl -w vm.swappiness=10 || true
+          fi
           sudo sysctl -w vm.vfs_cache_pressure=50 || true
           swapon --show
           free -h
@@ -207,8 +240,8 @@ jobs:
           USE_CCACHE: ${{ inputs.ccache || 'true' }}
           ALLOW_MISSING_DEPENDENCIES: 'true'
           MALLOC_ARENA_MAX: '2'
-          GOGC: '50'
-          GOMEMLIMIT: '12GiB'
+          GOGC: '20'
+          GOMEMLIMIT: '8GiB'
           GOMAXPROCS: '2'
           BUILD_JOBS: ${{ inputs.jobs || '2' }}
           MAKEFILE_NAME: ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}
