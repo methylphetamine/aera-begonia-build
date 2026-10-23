@@ -125,17 +125,12 @@ jobs:
           # Partial clone keeps .repo small: blobs are fetched on checkout
           # instead of holding a second full copy of the tree during sync.
           repo init -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" --partial-clone
-          # AERA ships remove-minimal.xml for recovery builds, but it is not
-          # included by default.  Without it repo syncs the full ~989-project
-          # AOSP tree and soong_build needs more memory than the 16 GB runner
-          # has.  Copy it into local_manifests so repo applies the removals
-          # after default.xml/twrp-default.xml.
+          # twrp-default.xml already includes AERA's remove-minimal.xml, so
+          # the recovery tree is ~410 projects instead of the full ~989.
+          # Do not copy remove-minimal.xml into local_manifests again: repo
+          # rejects the second application as a removal of non-existent
+          # projects.
           mkdir -p .repo/local_manifests
-          if [ ! -f .repo/manifests/remove-minimal.xml ]; then
-            echo "::error::AERA remove-minimal.xml was not found after repo init"
-            exit 1
-          fi
-          cp .repo/manifests/remove-minimal.xml .repo/local_manifests/remove-minimal.xml
           # Recovery does not build CTS, the SDK or the kernel prebuilts
           # (begonia uses a prebuilt Image.gz). Dropping them before sync saves
           # several GB. Do NOT drop test/*: test/app_compat/csuite defines the
