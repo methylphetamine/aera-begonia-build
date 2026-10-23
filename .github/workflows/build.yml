@@ -18,7 +18,7 @@ on:
       jobs:
         description: 'Parallel make jobs (2 is the safe maximum on a 16 GB hosted runner)'
         required: false
-        default: '1'
+        default: '2'
       ccache:
         description: 'Use ccache (true/false)'
         required: false
@@ -58,7 +58,7 @@ jobs:
         run: |
           echo "manifest   : $MANIFEST_URL @ $MANIFEST_BRANCH"
           echo "lunch      : ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}"
-          echo "target     : ${{ inputs.build_target || 'adbd recoveryimage' }}"
+          echo "target     : ${{ inputs.build_target || 'recoveryimage' }}"
           echo "jobs       : ${{ inputs.jobs || '2' }}"
           echo "ccache     : ${{ inputs.ccache || 'true' }}"
           echo "free space before:"
@@ -133,9 +133,11 @@ jobs:
           mkdir -p .repo/local_manifests
           # Recovery does not build CTS, the SDK or the kernel prebuilts
           # (begonia uses a prebuilt Image.gz). Dropping them before sync saves
-          # several GB. Do NOT drop test/*: test/app_compat/csuite defines the
-          # csuite_test module type that other Android.bp files reference, and
-          # dropping it breaks soong bootstrap.
+          # several GB.  The only test project we must keep is
+          # test/app_compat/csuite: it provides the csuite_test module type that
+          # art/test and frameworks/base test Android.bp files reference.
+          # Keeping the whole test tree makes soong_build analyse thousands of
+          # extra modules and is what pushed this 16 GB runner into swap death.
           cat > .repo/local_manifests/no-extra.xml <<'XML'
           <manifest>
             <remove-project path="cts" />
@@ -146,9 +148,18 @@ jobs:
             <remove-project path="kernel/prebuilts/6.12/arm64" />
             <remove-project path="kernel/prebuilts/common-modules/trusty/6.6/arm64" />
             <remove-project path="kernel/prebuilts/common-modules/trusty/6.12/arm64" />
+            <!-- Keep csuite for csuite_test; drop every other test project
+                 that remove-minimal.xml leaves in the manifest. -->
+            <remove-project path="test/dittosuite" />
+            <remove-project path="test/robolectric-extensions" />
+            <remove-project path="test/suite_harness" />
+            <remove-project path="test/vts" />
+            <remove-project path="test/vts-testcase/hal" />
           </manifest>
           XML
-          repo sync -c --force-sync --no-clone-bundle --no-tags -j${{ inputs.jobs || '2' }}
+          # Sync with more jobs than the compile step: this is network/disk
+          # bound, and the old -j1 sync alone took about an hour.
+          repo sync -c --force-sync --no-clone-bundle --no-tags -j4
           df -h /
 
       - name: Trim disk before build
@@ -235,17 +246,17 @@ jobs:
           USE_CCACHE: ${{ inputs.ccache || 'true' }}
           ALLOW_MISSING_DEPENDENCIES: 'true'
           MALLOC_ARENA_MAX: '2'
-          # soong_build is the memory peak.  Keep its Go heap well below the
-          # runner's 16 GB and run its Go runtime single-threaded; the C++
-          # compilers still use -j2.  A hard 12 GiB limit previously let the
-          # runner enter swap death before GitHub shut it down.
-          GOGC: '5'
-          GOMEMLIMIT: '4GiB'
-          GOMAXPROCS: '1'
-          SOONG_THREADS: '1'
+          # soong_build is the memory peak.  Keep a firm cap well below the
+          # runner's 16 GB, but do not set GOGC=5 or GOMAXPROCS=1: that makes
+          # Go collect constantly and turns the Android.bp analysis into a
+          # 20+ minute silent step, after which the hosted runner is recycled
+          # with exit 143.  A 50% GC target and all four cores are both faster
+          # and use less total memory than swap-thrashing at -j1.
+          GOGC: '50'
+          GOMEMLIMIT: '8GiB'
           BUILD_JOBS: ${{ inputs.jobs || '2' }}
           MAKEFILE_NAME: ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}
-          BUILD_TARGET: ${{ inputs.build_target || 'adbd recoveryimage' }}
+          BUILD_TARGET: ${{ inputs.build_target || 'recoveryimage' }}
           BUILD_USERNAME: A_X
           BUILD_HOSTNAME: poxproject
           AERA_BUILD_DEVICE: begonia
@@ -260,13 +271,16 @@ jobs:
           # Memory/disk sampler.  Stream it into the job log as well as
           # monitor.log so the last state survives a runner shutdown.
           : > monitor.log
-          ( while :; do
+          ( set +e
+            while :; do
               echo "=== $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
               free -h
-              cat /proc/pressure/memory 2>/dev/null || true
+              cat /proc/pressure/memory 2>/dev/null
               df -h "$SRC_DIR" / 2>/dev/null
               ps -eo pid,rss,pcpu,comm --sort=-rss | head -12
-              dmesg -T 2>/dev/null | tail -20
+              # dmesg needs root on the hosted runner; never let it kill the
+              # sampler subshell (set -e is inherited from the step shell).
+              sudo dmesg -T 2>/dev/null | tail -20
               sleep 30
             done ) > monitor.log 2>&1 &
           MON_PID=$!
@@ -278,9 +292,9 @@ jobs:
           # dispatch with jobs=4 still succeeds, it is just clamped here.
           JOBS="$BUILD_JOBS"
           case "$JOBS" in ''|*[!0-9]*) JOBS=2 ;; esac
-          if [ "$JOBS" -gt 1 ]; then
-            echo "clamping -j$JOBS to -j1: 16 GB runner OOM/thrash safeguard"
-            JOBS=1
+          if [ "$JOBS" -gt 2 ]; then
+            echo "clamping -j$JOBS to -j2: 16 GB runner OOM/thrash safeguard"
+            JOBS=2
           fi
           echo "make jobs: $JOBS"
 
