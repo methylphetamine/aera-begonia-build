@@ -429,6 +429,16 @@ jobs:
           mka -j"$JOBS" $BUILD_TARGET 2>&1 | tee -a build.log
           RC=${PIPESTATUS[0]}
           kill "$MON_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then
+            echo "===== tail build.log (last 250 lines) ====="
+            tail -n 250 build.log || true
+            echo "===== dmesg (last 80 lines) ====="
+            sudo dmesg -T 2>/dev/null | tail -80 || true
+            echo "===== memory ====="
+            free -h || true
+            echo "===== top rss ====="
+            ps -eo pid,rss,pcpu,comm --sort=-rss 2>/dev/null | head -15 || true
+          fi
           exit "$RC"
 
       - name: ccache stats
