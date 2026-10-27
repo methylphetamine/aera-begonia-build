@@ -45,7 +45,7 @@ env:
 jobs:
   build:
     name: Build AERA recovery image and flashable package
-    runs-on: ubuntu-22.04-8core
+    runs-on: ubuntu-22.04
     timeout-minutes: 350
 
     steps:
@@ -168,6 +168,15 @@ jobs:
           find "$SRC_DIR/prebuilts" -maxdepth 6 -type d -name .git -prune -exec rm -rf {} + 2>/dev/null || true
           find "$SRC_DIR/.repo/project-objects" -type d -name '*.git' -prune -exec rm -rf {} + 2>/dev/null || true
           df -h /
+
+      - name: Drop non-recovery subtrees
+        run: |
+          cd "$SRC_DIR"
+          # Recovery image does not need apps or their resources; dropping them
+          # removes hundreds of Android.bp files from the Soong graph.
+          rm -rf packages/apps frameworks/base/packages 2>/dev/null || true
+          echo "Android.bp files now: $(find . -name Android.bp -not -path './out/*' | wc -l)"
+          df -h .
 
       - name: Prune test-only source trees
         run: |
