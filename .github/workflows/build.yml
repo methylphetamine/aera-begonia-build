@@ -45,7 +45,7 @@ env:
 jobs:
   build:
     name: Build AERA recovery image and flashable package
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04-8core
     timeout-minutes: 350
 
     steps:
