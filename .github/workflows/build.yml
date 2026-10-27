@@ -364,9 +364,9 @@ jobs:
           # analysis silent for 20+ minutes and then killed the runner).
           # GOMAXPROCS=2 leaves the other two cores for the runner agent, so
           # GitHub keeps receiving heartbeats while Soong analyses modules.
-          GOGC: '50'
-          GOMEMLIMIT: '10GiB'
-          GOMAXPROCS: '2'
+          GOGC: '25'
+          GOMEMLIMIT: '8GiB'
+          GOMAXPROCS: '1'
           BUILD_JOBS: ${{ inputs.jobs || '2' }}
           MAKEFILE_NAME: ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}
           BUILD_TARGET: ${{ inputs.build_target || 'adbd recoveryimage' }}
