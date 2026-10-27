@@ -185,15 +185,9 @@ jobs:
           # tests" and then panic.  test/app_compat/csuite is also kept: it
           # provides the csuite_test module type referenced by art/test.
           #
-          # The scan below has two guards.  First, a directory named tests/
-          # fuzz/benchmarks only counts as a test suite if some Android.bp or
-          # Android.mk exists in its subtree: AIDL frozen APIs live in Java
-          # package paths such as
-          # aidl_api/aidl-test-versioned-interface/1/android/aidl/versioned/tests
-          # and must not be deleted.  Second, it is a fixpoint: blueprints
-          # inside a tree that is being deleted do not count as references,
-          # because they disappear too, and a kept tree protects any test dir
-          # nested inside it.
+          # The scan below is a fixpoint: blueprints inside a tree that is
+          # being deleted do not count as references, because they disappear
+          # too, and a kept tree protects any test dir nested inside it.
           cd "$SRC_DIR"
           python3 - <<'PY'
           import os
@@ -209,28 +203,27 @@ jobs:
           ALWAYS_KEEP = {"system/tools/aidl/tests"}
 
           def walk(root):
-              for dirpath, dirnames, filenames in os.walk(root):
+              for dirpath, dirnames, _ in os.walk(root):
                   dirnames[:] = [d for d in dirnames
                                  if not d.startswith(".") and d not in SKIP_DIRS]
-                  yield dirpath, filenames
+                  yield dirpath
 
           def collect_candidates():
-              # Test-suite roots, not Java/Kotlin packages named tests.
               cand = set()
-              for dirpath, filenames in walk("."):
-                  if "Android.bp" not in filenames and "Android.mk" not in filenames:
+              for root in ROOTS:
+                  if not os.path.isdir(root):
                       continue
-                  path = os.path.normpath(dirpath)
-                  top = path.split(os.sep)[0]
-                  while path not in ("", "."):
-                      base = os.path.basename(path)
-                      if top in ROOTS and base in TEST_NAMES:
-                          cand.add(path)
-                      if path == "art/test":
-                          cand.add(path)
-                      if top == "libcore" and base == "test":
-                          cand.add(path)
-                      path = os.path.dirname(path)
+                  for dirpath in walk(root):
+                      if "aidl_api" in dirpath.split(os.sep):
+                          continue
+                      if os.path.basename(dirpath) in TEST_NAMES:
+                          cand.add(os.path.normpath(dirpath))
+              if os.path.isdir("art/test"):
+                  cand.add("art/test")
+              if os.path.isdir("libcore"):
+                  for dirpath in walk("libcore"):
+                      if os.path.basename(dirpath) == "test":
+                          cand.add(os.path.normpath(dirpath))
               return cand
 
           def deepest_owner(path, cand):
@@ -248,7 +241,9 @@ jobs:
 
           # (owning test tree or None, referenced test trees)
           blueprints = []
-          for dirpath, filenames in walk("."):
+          for dirpath, dirnames, filenames in os.walk("."):
+              dirnames[:] = [d for d in dirnames
+                             if not d.startswith(".") and d not in SKIP_DIRS]
               if "Android.bp" not in filenames:
                   continue
               owner = deepest_owner(dirpath, cand)
@@ -290,6 +285,8 @@ jobs:
 
           removed = []
           for c in sorted(cand - keep, key=len, reverse=True):
+              if "aidl_api" in c.split(os.sep):
+                  continue
               if os.path.isdir(c):
                   shutil.rmtree(c, ignore_errors=True)
                   removed.append(c)
@@ -301,6 +298,7 @@ jobs:
           echo "Android.bp files remaining: $(find . -name Android.bp -not -path './out/*' | wc -l)"
           du -sh .
           df -h /
+
 
       - name: Add swap and tune memory pressure
         run: |
@@ -364,9 +362,9 @@ jobs:
           # analysis silent for 20+ minutes and then killed the runner).
           # GOMAXPROCS=2 leaves the other two cores for the runner agent, so
           # GitHub keeps receiving heartbeats while Soong analyses modules.
-          GOGC: '25'
-          GOMEMLIMIT: '8GiB'
-          GOMAXPROCS: '1'
+          GOGC: '50'
+          GOMEMLIMIT: '10GiB'
+          GOMAXPROCS: '2'
           BUILD_JOBS: ${{ inputs.jobs || '2' }}
           MAKEFILE_NAME: ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}
           BUILD_TARGET: ${{ inputs.build_target || 'adbd recoveryimage' }}
