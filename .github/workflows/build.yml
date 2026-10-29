@@ -252,6 +252,11 @@ jobs:
           #   system/sepolicy/build/soong/selinux_contexts.go, but is not in a
           #   blueprint we read.  Keep this subtree entirely.
           ALWAYS_KEEP.add("system/sepolicy/tests")
+          # Add build/soong because it contains Soong plugins that reference test
+          # modules by name (check_prop_prefix) and the failure in product_config.go
+          # is due to a parser bug in the upstream source; keeping it avoids the
+          # ninja error while Soong analysis succeeds.
+          ALWAYS_KEEP.add("build/soong")
           # Add any Soong plugin project that references a test module by name:
           #   system/sepolicy/tests/sepolicy_freeze_test appears in
           #   system/sepolicy/build/soong/selinux_contexts.go, but is not in a
