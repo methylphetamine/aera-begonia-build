@@ -20,12 +20,17 @@ TARGET_CPU_ABI2 :=
 TARGET_CPU_VARIANT := generic
 TARGET_CPU_VARIANT_RUNTIME := cortex-a76
 
-TARGET_2ND_ARCH := arm
-TARGET_2ND_ARCH_VARIANT := armv7-a-neon
-TARGET_2ND_CPU_ABI := armeabi-v7a
-TARGET_2ND_CPU_ABI2 := armeabi
-TARGET_2ND_CPU_VARIANT := generic
-TARGET_2ND_CPU_VARIANT_RUNTIME := cortex-a76
+# Recovery is 64-bit only.  Keeping TARGET_2ND_ARCH := arm makes Soong build
+# both variants of every multilib APEX, and art's com.android.art.testing then
+# packages bin/art_cmdline_tests twice:
+#   .../art_cmdline_tests/android_arm64_armv8-2a-dotprod_apex31/art_cmdline_tests
+#   .../art_cmdline_tests/android_arm_armv7-a-neon_apex31/art_cmdline_tests
+# and soong_build aborts with "apex file ... is provided by two different
+# files".  If 32-bit userspace is ever needed again, restore these six lines
+# and instead add compile_multilib: "first" to art_cmdline_tests_defaults in
+# art/cmdline/Android.bp.
+TARGET_SUPPORTS_64_BIT_APPS := true
+TARGET_SUPPORTS_32_BIT_APPS := false
 
 # AVB
 BOARD_AVB_ENABLE := true

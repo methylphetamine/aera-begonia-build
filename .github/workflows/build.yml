@@ -153,13 +153,24 @@ jobs:
             <remove-project path="test/dittosuite" />
             <remove-project path="test/robolectric-extensions" />
             <remove-project path="test/suite_harness" />
-            <remove-project path="test/vts" />
-            <remove-project path="test/vts-testcase/hal" />
+            <!-- Do NOT remove test/vts or test/vts-testcase/hal: assemble_vintf
+                 needs libvts_vintf_test_common from them, and the failure only
+                 shows up ~40 minutes in, long after soong has finished. -->
           </manifest>
           XML
           # Sync with more jobs than the compile step: this is network/disk
-          # bound, and the old -j1 sync alone took about an hour.
-          repo sync -c --force-sync --no-clone-bundle --no-tags -j4
+          # bound, and the old -j1 sync alone took about an hour.  googlesource
+          # rate-limits and returns 503 in bursts, so retry the whole sync
+          # (run #23 died on a single "Unable to fully sync the tree").
+          ok=0
+          for i in 1 2 3 4; do
+            if repo sync -c --force-sync --no-clone-bundle --no-tags -j$([ $i -le 1 ] && echo 4 || echo 2); then
+              ok=1; break
+            fi
+            echo "sync attempt $i failed, retrying in $((i*45))s"
+            sleep $((i*45))
+          done
+          [ "$ok" = 1 ] || { echo "::error::repo sync failed after 4 attempts"; exit 1; }
           df -h /
 
       - name: Trim disk before build
@@ -322,16 +333,32 @@ jobs:
           sudo systemctl stop earlyoom 2>/dev/null || true
           echo "oomd: $(systemctl is-active systemd-oomd 2>/dev/null || echo absent)"
 
-          # Keep disk swap as a safety valve, but do not make it the first
-          # choice: swapping soong_build to disk is what turns a slow analysis
-          # step into a runner that stops answering GitHub.  zram/compressed
-          # swap was tried in earlier runs and did not prevent the shutdown,
-          # so use a plain 8 GB file and a low swappiness.
+          # Compressed in-RAM swap (zram) is the only swap that keeps up with
+          # soong_build.  A plain disk swapfile at swappiness=10 is what turned
+          # the analysis step into a 30-minute freeze and an exit 143; zram
+          # compresses anonymous pages without waiting on the runner's disk.
+          ZRAM=0
+          sudo modprobe zram 2>/dev/null || true
+          if [ -b /dev/zram0 ]; then
+            echo 1 | sudo tee /sys/block/zram0/reset >/dev/null 2>&1 || true
+            echo zstd | sudo tee /sys/block/zram0/comp_algorithm >/dev/null 2>&1 || \
+              echo lz4 | sudo tee /sys/block/zram0/comp_algorithm >/dev/null 2>&1 || true
+            echo 12G | sudo tee /sys/block/zram0/disksize >/dev/null 2>&1 || true
+            if sudo mkswap /dev/zram0 >/dev/null 2>&1 && sudo swapon -p 100 /dev/zram0; then
+              ZRAM=1
+            fi
+          fi
+          [ "$ZRAM" -eq 1 ] || echo "::warning::zram unavailable, disk swap only"
+
+          # Disk swap stays as a last-resort overflow, not the primary device.
           sudo fallocate -l 8G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon -p 10 /swapfile
-          sudo sysctl -w vm.swappiness=10 || true
+          # Reclaim anonymous pages aggressively: with zram, "swap" is a cheap
+          # memcpy, so high swappiness is correct here (10 is not).
+          sudo sysctl -w vm.swappiness=180 || true
+          sudo sysctl -w vm.page-cluster=0 || true
           sudo sysctl -w vm.vfs_cache_pressure=50 || true
           swapon --show
           free -h
@@ -365,14 +392,13 @@ jobs:
           USE_CCACHE: ${{ inputs.ccache || 'true' }}
           ALLOW_MISSING_DEPENDENCIES: 'true'
           MALLOC_ARENA_MAX: '2'
-          # soong_build is the memory peak.  After the test prune its live
-          # heap should be well under the runner's 16 GB, so give Go enough
-          # headroom that it does not GC-thrash (the old 4 GiB limit made the
-          # analysis silent for 20+ minutes and then killed the runner).
-          # GOMAXPROCS=2 leaves the other two cores for the runner agent, so
-          # GitHub keeps receiving heartbeats while Soong analyses modules.
-          GOGC: '50'
-          GOMEMLIMIT: '10GiB'
+          # soong_build's live heap peaks around 12.6 GB on this tree, so any
+          # GOMEMLIMIT below that is not a limit at all: Go just turns the
+          # whole analysis into a GC storm and the runner stops answering
+          # (exit 143).  Leave the GC target at the default and let zram absorb
+          # the overshoot instead.  GOMAXPROCS=2 keeps a core free for the
+          # runner agent's heartbeats.
+          GOGC: '100'
           GOMAXPROCS: '2'
           BUILD_JOBS: ${{ inputs.jobs || '2' }}
           MAKEFILE_NAME: ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}
