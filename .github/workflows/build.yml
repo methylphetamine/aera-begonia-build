@@ -184,8 +184,16 @@ jobs:
         run: |
           cd "$SRC_DIR"
           # Recovery image does not need apps or their resources; dropping them
-          # removes hundreds of Android.bp files from the Soong graph.
-          rm -rf packages/apps frameworks/base/packages 2>/dev/null || true
+          # removes hundreds of Android.bp files from the Soong graph.  Keep
+          # frameworks/base/packages/overlays: build/make/core/layoutlib_data.mk
+          # runs "find frameworks/base/packages/overlays/*/res/" while kati
+          # parses, so deleting the directory makes every run print a
+          # "No such file or directory" error from a shell function.
+          rm -rf packages/apps 2>/dev/null || true
+          if [ -d frameworks/base/packages ]; then
+            find frameworks/base/packages -mindepth 1 -maxdepth 1 \
+              ! -name overlays -exec rm -rf {} + 2>/dev/null || true
+          fi
           echo "Android.bp files now: $(find . -name Android.bp -not -path './out/*' | wc -l)"
           df -h .
 
@@ -335,6 +343,67 @@ jobs:
           for c in sorted(cand - keep):
               if c in mk_blob:
                   keep.add(c)
+
+          # Neither scan sees modules referenced by *name* from Soong's own Go
+          # code: build/soong/selinux_contexts.go does BuiltTool("check_prop_prefix")
+          # and that module lives in system/sepolicy/tests/Android.bp, so the
+          # prune deleted it and ninja died with
+          #   "check_prop_prefix ... missing and no known rule to make it".
+          # Map every module name defined inside a candidate to its tree, then
+          # keep the tree when a surviving blueprint, makefile or Soong plugin
+          # names that module.
+          name_re = re.compile(r'^\s*name:\s*"([^"]+)"', re.M)
+          name_owner = {}
+          for c in cand:
+              if not os.path.isdir(c):
+                  continue
+              for dirpath, dirnames, filenames in os.walk(c):
+                  dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                  for fn in filenames:
+                      if not fn.endswith(".bp"):
+                          continue
+                      try:
+                          with open(os.path.join(dirpath, fn),
+                                    encoding="utf-8", errors="replace") as fh:
+                              text = fh.read()
+                      except OSError:
+                          continue
+                      for m in name_re.finditer(text):
+                          name_owner.setdefault(m.group(1), c)
+          for dirpath, dirnames, filenames in os.walk("."):
+              dirnames[:] = [d for d in dirnames
+                             if not d.startswith(".") and d not in SKIP_DIRS]
+              if deepest_owner(dirpath, cand) is not None:
+                  continue
+              # Soong plugins live under build/soong both at the root and in
+              # projects that ship their own rule (system/sepolicy/build/soong).
+              parts = os.path.normpath(dirpath).split(os.sep)
+              in_soong = any(parts[i] == "build" and parts[i + 1] == "soong"
+                             for i in range(len(parts) - 1))
+              for fn in filenames:
+                  if not (fn.endswith(".bp") or fn.endswith(".mk") or
+                          (in_soong and fn.endswith(".go"))):
+                      continue
+                  try:
+                      with open(os.path.join(dirpath, fn),
+                                encoding="utf-8", errors="replace") as fh:
+                          text = fh.read()
+                  except OSError:
+                      continue
+                  for tok in quoted_re.findall(text):
+                      owner = name_owner.get(tok)
+                      if owner is not None:
+                          keep.add(owner)
+
+          # Keeping a tree above can protect candidates nested inside it.
+          changed = True
+          while changed:
+              changed = False
+              for c in cand:
+                  if c not in keep and any(c != k and c.startswith(k + os.sep)
+                                           for k in keep):
+                      keep.add(c)
+                      changed = True
 
           removed = []
           for c in sorted(cand - keep, key=len, reverse=True):
