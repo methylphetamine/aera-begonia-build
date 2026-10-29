@@ -264,15 +264,24 @@ jobs:
           for dirpath, dirnames, filenames in os.walk("."):
               dirnames[:] = [d for d in dirnames
                              if not d.startswith(".") and d not in SKIP_DIRS]
-              if "Android.bp" not in filenames:
+              # Not every blueprint is called Android.bp: libcore uses
+              # JavaLibrary.bp, and other trees use *.bp too.  Reading only
+              # Android.bp meant their references were invisible, so libcore's
+              # src/test trees were deleted and core-tests lost its sources --
+              # which surfaces later as "core-tests-prebuilt-dex-from-java:
+              # Installable device module must have LOCAL_SOONG_DEX_JAR set".
+              bps = [f for f in filenames if f.endswith(".bp")]
+              if not bps:
                   continue
               owner = deepest_owner(dirpath, cand)
-              try:
-                  with open(os.path.join(dirpath, "Android.bp"),
-                            encoding="utf-8", errors="replace") as fh:
-                      text = fh.read()
-              except OSError:
-                  continue
+              text = ""
+              for bp in bps:
+                  try:
+                      with open(os.path.join(dirpath, bp),
+                                encoding="utf-8", errors="replace") as fh:
+                          text += fh.read() + "\n"
+                  except OSError:
+                      continue
               refs = set()
               for s in quoted_re.findall(text):
                   if not test_re.search(s) or s.startswith(":") or "$" in s:
