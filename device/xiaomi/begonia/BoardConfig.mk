@@ -153,7 +153,10 @@ TW_USE_FSCRYPT_POLICY := 1
 # erofs + ext4 pairs for every read-only system/vendor partition. EROFS is
 # read-only, so no mkfs/fsck userspace tools are needed in recovery.
 # Recovery
-TARGET_RECOVERY_PIXEL_FORMAT := "RGBX_8888"
+# Do not quote this value: build/make writes it into soong.*.extra.variables
+# with add_json_str, which does not escape quotes, so "RGBX_8888" produces
+# invalid JSON and merge_json aborts the build at ~90%.
+TARGET_RECOVERY_PIXEL_FORMAT := RGBX_8888
 TARGET_RECOVERY_DEVICE_DIRS += $(DEVICE_PATH)
 TARGET_RECOVERY_FSTAB := $(DEVICE_PATH)/recovery/root/system/etc/recovery.fstab
 
