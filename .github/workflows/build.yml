@@ -312,6 +312,30 @@ jobs:
                           keep.add(c)
                           changed = True
 
+          # Make-level references are invisible to the blueprint scan because
+          # they are unquoted includes: art/Android.mk has
+          # "include art/test/Android.run-test.mk", so deleting art/test breaks
+          # kati later with "No such file or directory".  Keep any candidate
+          # whose path is mentioned by a .mk file that is itself surviving.
+          mk_blob = []
+          for dirpath, dirnames, filenames in os.walk("."):
+              dirnames[:] = [d for d in dirnames
+                             if not d.startswith(".") and d not in SKIP_DIRS]
+              if deepest_owner(dirpath, cand) is not None:
+                  continue
+              for fn in filenames:
+                  if fn.endswith(".mk"):
+                      try:
+                          with open(os.path.join(dirpath, fn),
+                                    encoding="utf-8", errors="replace") as fh:
+                              mk_blob.append(fh.read())
+                      except OSError:
+                          pass
+          mk_blob = "\n".join(mk_blob)
+          for c in sorted(cand - keep):
+              if c in mk_blob:
+                  keep.add(c)
+
           removed = []
           for c in sorted(cand - keep, key=len, reverse=True):
               if "aidl_api" in c.split(os.sep):
