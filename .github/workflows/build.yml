@@ -39,7 +39,12 @@ env:
   MANIFEST_URL: 'https://github.com/AERA-Recovery/android_manifest.git'
   MANIFEST_BRANCH: ${{ github.event.inputs.manifest_branch || 'aera-16.0' }}
   SRC_DIR: 'aosp'
-  CCACHE_DIR: '${{ github.workspace }}/.ccache'
+  # Soong runs every compiler inside nsjail with "-R /" and bind-mounts only
+  # /tmp, $SRC_DIR and out/ read-write.  A ccache dir anywhere else (the
+  # workspace root, or ~/.ccache) is read-only inside the sandbox, and ccache
+  # fails with "Failed to create directory .ccache/tmp: Read-only file system"
+  # before clang is ever executed -- which is exactly how run #31 died.
+  CCACHE_DIR: '${{ github.workspace }}/aosp/out/ccache'
   CCACHE_EXEC: '/usr/bin/ccache'
 
 jobs:
@@ -549,13 +554,17 @@ jobs:
           MON_PID=$!
           echo "monitor pid $MON_PID -> $SRC_DIR/monitor.log"
 
-          # Never run more than two compilers on the 16 GB hosted runner.  A
-          # dispatch with jobs=4 still succeeds, it is just clamped here.
+          # Compile parallelism.  Soong's analysis phase (soong_build) peaked at
+          # 13-14 GB in runs #28-#31 and is bounded by GOMAXPROCS=2, not by -j;
+          # this knob only controls ninja once analysis is done, where each
+          # clang is a few hundred MB and 19 GB of swap sits underneath.  The
+          # graph is 27,499 edges, so -j2 cannot finish inside the 350 minute
+          # job timeout.
           JOBS="$BUILD_JOBS"
           case "$JOBS" in ''|*[!0-9]*) JOBS=2 ;; esac
-          if [ "$JOBS" -gt 2 ]; then
-            echo "clamping -j$JOBS to -j2: 16 GB runner OOM/thrash safeguard"
-            JOBS=2
+          if [ "$JOBS" -gt 4 ]; then
+            echo "clamping -j$JOBS to -j4: 4 vCPU runner"
+            JOBS=4
           fi
           echo "make jobs: $JOBS"
 
