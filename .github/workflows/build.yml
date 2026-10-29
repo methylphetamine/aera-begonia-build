@@ -247,6 +247,16 @@ jobs:
           # aidlInterface modules in system/tools/aidl/Android.bp take their
           # API dumps from tests/, so this tree must always survive.
           ALWAYS_KEEP = {"system/tools/aidl/tests"}
+          # Add any Soong plugin project that references a test module by name:
+          #   system/sepolicy/tests/sepolicy_freeze_test appears in
+          #   system/sepolicy/build/soong/selinux_contexts.go, but is not in a
+          #   blueprint we read.  Keep this subtree entirely.
+          ALWAYS_KEEP.add("system/sepolicy/tests")
+          # Add any Soong plugin project that references a test module by name:
+          #   system/sepolicy/tests/sepolicy_freeze_test appears in
+          #   system/sepolicy/build/soong/selinux_contexts.go, but is not in a
+          #   blueprint we read.  Keep this subtree entirely.
+          ALWAYS_KEEP.add("system/sepolicy/tests")
 
           def walk(root):
               for dirpath, dirnames, _ in os.walk(root):
