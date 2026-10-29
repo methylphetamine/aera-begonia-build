@@ -339,6 +339,11 @@ jobs:
           # compresses anonymous pages without waiting on the runner's disk.
           ZRAM=0
           sudo modprobe zram 2>/dev/null || true
+          if [ ! -b /dev/zram0 ]; then
+            # ubuntu-22.04 images ship without the zram module in some builds.
+            sudo apt-get install -y -qq linux-modules-extra-"$(uname -r)" >/dev/null 2>&1 || true
+            sudo modprobe zram 2>/dev/null || true
+          fi
           if [ -b /dev/zram0 ]; then
             echo 1 | sudo tee /sys/block/zram0/reset >/dev/null 2>&1 || true
             echo zstd | sudo tee /sys/block/zram0/comp_algorithm >/dev/null 2>&1 || \
@@ -348,17 +353,23 @@ jobs:
               ZRAM=1
             fi
           fi
-          [ "$ZRAM" -eq 1 ] || echo "::warning::zram unavailable, disk swap only"
 
           # Disk swap stays as a last-resort overflow, not the primary device.
           sudo fallocate -l 8G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon -p 10 /swapfile
-          # Reclaim anonymous pages aggressively: with zram, "swap" is a cheap
-          # memcpy, so high swappiness is correct here (10 is not).
-          sudo sysctl -w vm.swappiness=180 || true
-          sudo sysctl -w vm.page-cluster=0 || true
+          # Only be aggressive if the compressed device is actually there.
+          # With zram, "swapping" an anonymous page is a memcpy into RAM, so
+          # 180 is right; on a plain disk swapfile it would thrash the runner
+          # and reproduce the exit-143 freeze this is meant to prevent.
+          if [ "$ZRAM" -eq 1 ]; then
+            sudo sysctl -w vm.swappiness=180 || true
+            sudo sysctl -w vm.page-cluster=0 || true
+          else
+            echo "::warning::zram unavailable, disk swap only; staying at swappiness=10"
+            sudo sysctl -w vm.swappiness=10 || true
+          fi
           sudo sysctl -w vm.vfs_cache_pressure=50 || true
           swapon --show
           free -h
