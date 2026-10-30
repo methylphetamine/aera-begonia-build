@@ -183,6 +183,23 @@ jobs:
           [ "$ok" = 1 ] || { echo "::error::repo sync failed after 4 attempts"; exit 1; }
           df -h /
 
+      - name: Patch vold for runtime FBE decryption
+        run: |
+          set -e
+          VOLD="$SRC_DIR/system/vold/FsCrypt.cpp"
+          test -f "$VOLD"
+          python3 scripts/patch_vold_dynamic_fbe.py "$VOLD"
+          # Fail the build instead of silently shipping an undecryptable image
+          # if upstream moved the anchors.
+          grep -q 'FBE: using installed ROM fstab /etc/additional.fstab' "$VOLD"
+          grep -q 'FBE: installed /data policy is v' "$VOLD"
+          grep -q 'if (retry && s_data_options.version != 1)' "$VOLD"
+          grep -q 's_data_options.use_hw_wrapped_key = !s_data_options.use_hw_wrapped_key;' "$VOLD"
+          grep -q 's_data_options.use_hw_wrapped_key = false;' "$VOLD"
+          grep -q 'prepare_dir("/data/misc/vold"' "$VOLD"
+          echo "--- FsCrypt.cpp changes ---"
+          git -C "$SRC_DIR/system/vold" diff --stat || true
+
       - name: Trim disk before build
         run: |
           du -sh "$SRC_DIR" 2>/dev/null || true
