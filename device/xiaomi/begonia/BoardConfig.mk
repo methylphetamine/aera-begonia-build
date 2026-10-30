@@ -20,12 +20,17 @@ TARGET_CPU_ABI2 :=
 TARGET_CPU_VARIANT := generic
 TARGET_CPU_VARIANT_RUNTIME := cortex-a76
 
-TARGET_2ND_ARCH := arm
-TARGET_2ND_ARCH_VARIANT := armv7-a-neon
-TARGET_2ND_CPU_ABI := armeabi-v7a
-TARGET_2ND_CPU_ABI2 := armeabi
-TARGET_2ND_CPU_VARIANT := generic
-TARGET_2ND_CPU_VARIANT_RUNTIME := cortex-a76
+# Recovery is 64-bit only.  Keeping TARGET_2ND_ARCH := arm makes Soong build
+# both variants of every multilib APEX, and art's com.android.art.testing then
+# packages bin/art_cmdline_tests twice:
+#   .../art_cmdline_tests/android_arm64_armv8-2a-dotprod_apex31/art_cmdline_tests
+#   .../art_cmdline_tests/android_arm_armv7-a-neon_apex31/art_cmdline_tests
+# and soong_build aborts with "apex file ... is provided by two different
+# files".  If 32-bit userspace is ever needed again, restore these six lines
+# and instead add compile_multilib: "first" to art_cmdline_tests_defaults in
+# art/cmdline/Android.bp.
+TARGET_SUPPORTS_64_BIT_APPS := true
+TARGET_SUPPORTS_32_BIT_APPS := false
 
 # AVB
 BOARD_AVB_ENABLE := true
@@ -148,7 +153,10 @@ TW_USE_FSCRYPT_POLICY := 1
 # erofs + ext4 pairs for every read-only system/vendor partition. EROFS is
 # read-only, so no mkfs/fsck userspace tools are needed in recovery.
 # Recovery
-TARGET_RECOVERY_PIXEL_FORMAT := "RGBX_8888"
+# Do not quote this value: build/make writes it into soong.*.extra.variables
+# with add_json_str, which does not escape quotes, so "RGBX_8888" produces
+# invalid JSON and merge_json aborts the build at ~90%.
+TARGET_RECOVERY_PIXEL_FORMAT := RGBX_8888
 TARGET_RECOVERY_DEVICE_DIRS += $(DEVICE_PATH)
 TARGET_RECOVERY_FSTAB := $(DEVICE_PATH)/recovery/root/system/etc/recovery.fstab
 

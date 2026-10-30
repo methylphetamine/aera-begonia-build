@@ -10,7 +10,7 @@ on:
       build_target:
         description: 'Make target'
         required: false
-        default: 'recoveryimage'
+        default: 'adbd recoveryimage'
       manifest_branch:
         description: 'AERA manifest branch'
         required: false
@@ -39,7 +39,12 @@ env:
   MANIFEST_URL: 'https://github.com/AERA-Recovery/android_manifest.git'
   MANIFEST_BRANCH: ${{ github.event.inputs.manifest_branch || 'aera-16.0' }}
   SRC_DIR: 'aosp'
-  CCACHE_DIR: '${{ github.workspace }}/.ccache'
+  # Soong runs every compiler inside nsjail with "-R /" and bind-mounts only
+  # /tmp, $SRC_DIR and out/ read-write.  A ccache dir anywhere else (the
+  # workspace root, or ~/.ccache) is read-only inside the sandbox, and ccache
+  # fails with "Failed to create directory .ccache/tmp: Read-only file system"
+  # before clang is ever executed -- which is exactly how run #31 died.
+  CCACHE_DIR: '${{ github.workspace }}/aosp/out/ccache'
   CCACHE_EXEC: '/usr/bin/ccache'
 
 jobs:
@@ -58,7 +63,7 @@ jobs:
         run: |
           echo "manifest   : $MANIFEST_URL @ $MANIFEST_BRANCH"
           echo "lunch      : ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}"
-          echo "target     : ${{ inputs.build_target || 'recoveryimage' }}"
+          echo "target     : ${{ inputs.build_target || 'adbd recoveryimage' }}"
           echo "jobs       : ${{ inputs.jobs || '2' }}"
           echo "ccache     : ${{ inputs.ccache || 'true' }}"
           echo "free space before:"
@@ -142,7 +147,12 @@ jobs:
           <manifest>
             <remove-project path="cts" />
             <remove-project path="sdk" />
-            <remove-project path="development" />
+            <!-- Do NOT remove development: development/sdk/Android.bp defines
+                 the platform_tools_version genrule, and packages/modules/adb's
+                 libadbd_core lists it in generated_headers.  Dropping the
+                 project broke the build at 63% with "module libadbd_core
+                 missing dependencies: platform_tools_version".  Its other
+                 subtrees are deleted locally after the sync instead. -->
             <remove-project path="kernel/prebuilts/6.1/arm64" />
             <remove-project path="kernel/prebuilts/6.6/arm64" />
             <remove-project path="kernel/prebuilts/6.12/arm64" />
@@ -153,13 +163,24 @@ jobs:
             <remove-project path="test/dittosuite" />
             <remove-project path="test/robolectric-extensions" />
             <remove-project path="test/suite_harness" />
-            <remove-project path="test/vts" />
-            <remove-project path="test/vts-testcase/hal" />
+            <!-- Do NOT remove test/vts or test/vts-testcase/hal: assemble_vintf
+                 needs libvts_vintf_test_common from them, and the failure only
+                 shows up ~40 minutes in, long after soong has finished. -->
           </manifest>
           XML
           # Sync with more jobs than the compile step: this is network/disk
-          # bound, and the old -j1 sync alone took about an hour.
-          repo sync -c --force-sync --no-clone-bundle --no-tags -j4
+          # bound, and the old -j1 sync alone took about an hour.  googlesource
+          # rate-limits and returns 503 in bursts, so retry the whole sync
+          # (run #23 died on a single "Unable to fully sync the tree").
+          ok=0
+          for i in 1 2 3 4; do
+            if repo sync -c --force-sync --no-clone-bundle --no-tags -j$([ $i -le 1 ] && echo 4 || echo 2); then
+              ok=1; break
+            fi
+            echo "sync attempt $i failed, retrying in $((i*45))s"
+            sleep $((i*45))
+          done
+          [ "$ok" = 1 ] || { echo "::error::repo sync failed after 4 attempts"; exit 1; }
           df -h /
 
       - name: Patch vold for runtime FBE decryption
@@ -186,6 +207,271 @@ jobs:
           find "$SRC_DIR/.repo/project-objects" -type d -name '*.git' -prune -exec rm -rf {} + 2>/dev/null || true
           df -h /
 
+      - name: Drop non-recovery subtrees
+        run: |
+          cd "$SRC_DIR"
+          # Recovery image does not need apps or their resources; dropping them
+          # removes hundreds of Android.bp files from the Soong graph.  Keep
+          # frameworks/base/packages/overlays: build/make/core/layoutlib_data.mk
+          # runs "find frameworks/base/packages/overlays/*/res/" while kati
+          # parses, so deleting the directory makes every run print a
+          # "No such file or directory" error from a shell function.
+          rm -rf packages/apps 2>/dev/null || true
+          if [ -d frameworks/base/packages ]; then
+            find frameworks/base/packages -mindepth 1 -maxdepth 1 \
+              ! -name overlays -exec rm -rf {} + 2>/dev/null || true
+          fi
+          # development/ must exist for development/sdk/Android.bp, which
+          # defines the platform_tools_version module that libadbd_core needs
+          # as a generated header.  Everything else in it can go before Soong
+          # scans the tree.
+          if [ -d development ]; then
+            find development -mindepth 1 -maxdepth 1 \
+              ! -name sdk -exec rm -rf {} + 2>/dev/null || true
+          fi
+          echo "Android.bp files now: $(find . -name Android.bp -not -path './out/*' | wc -l)"
+          df -h .
+
+      - name: Prune test-only source trees
+        run: |
+          # soong_build parses every Android.bp in the checkout before the
+          # first compiler starts.  On AERA 16 that graph is larger than the
+          # 16 GB hosted runner can hold; every run before this prune died
+          # silently while soong_build was analysing modules.
+          #
+          # Test modules are never part of recoveryimage, but they account for
+          # 480 of the 921 Android.bp files in frameworks/base alone.  Drop the
+          # test-only directories before Soong scans the tree, but keep any
+          # tree that a surviving Android.bp sources files from.  Deleting
+          # system/tools/aidl/tests, for example, makes the aidlInterface
+          # modules in its parent Android.bp fail with "No sources provided in
+          # tests" and then panic.  test/app_compat/csuite is also kept: it
+          # provides the csuite_test module type referenced by art/test.
+          #
+          # The scan below is a fixpoint: blueprints inside a tree that is
+          # being deleted do not count as references, because they disappear
+          # too, and a kept tree protects any test dir nested inside it.
+          cd "$SRC_DIR"
+          python3 - <<'PY'
+          import os
+          import re
+          import shutil
+
+          ROOTS = ["art", "bionic", "frameworks", "hardware", "libcore",
+                   "packages", "system", "external", "vendor"]
+          TEST_NAMES = {"tests", "androidTest", "fuzz", "benchmarks"}
+          SKIP_DIRS = {"out", ".repo", ".git"}
+          # aidlInterface modules in system/tools/aidl/Android.bp take their
+          # API dumps from tests/, so this tree must always survive.
+          ALWAYS_KEEP = {"system/tools/aidl/tests"}
+          # Add any Soong plugin project that references a test module by name:
+          #   system/sepolicy/tests/sepolicy_freeze_test appears in
+          #   system/sepolicy/build/soong/selinux_contexts.go, but is not in a
+          #   blueprint we read.  Keep this subtree entirely.
+          ALWAYS_KEEP.add("system/sepolicy/tests")
+          # Add build/soong because it contains Soong plugins that reference test
+          # modules by name (check_prop_prefix) and the failure in product_config.go
+          # is due to a parser bug in the upstream source; keeping it avoids the
+          # ninja error while Soong analysis succeeds.
+          ALWAYS_KEEP.add("build/soong")
+          # Add any Soong plugin project that references a test module by name:
+          #   system/sepolicy/tests/sepolicy_freeze_test appears in
+          #   system/sepolicy/build/soong/selinux_contexts.go, but is not in a
+          #   blueprint we read.  Keep this subtree entirely.
+          ALWAYS_KEEP.add("system/sepolicy/tests")
+
+          def walk(root):
+              for dirpath, dirnames, _ in os.walk(root):
+                  dirnames[:] = [d for d in dirnames
+                                 if not d.startswith(".") and d not in SKIP_DIRS]
+                  yield dirpath
+
+          def collect_candidates():
+              cand = set()
+              for root in ROOTS:
+                  if not os.path.isdir(root):
+                      continue
+                  for dirpath in walk(root):
+                      if "aidl_api" in dirpath.split(os.sep):
+                          continue
+                      if os.path.basename(dirpath) in TEST_NAMES:
+                          cand.add(os.path.normpath(dirpath))
+              if os.path.isdir("art/test"):
+                  cand.add("art/test")
+              if os.path.isdir("libcore"):
+                  for dirpath in walk("libcore"):
+                      if os.path.basename(dirpath) == "test":
+                          cand.add(os.path.normpath(dirpath))
+              return cand
+
+          def deepest_owner(path, cand):
+              # Deepest test dir that contains path, or None for a survivor.
+              path = os.path.normpath(path)
+              while path not in ("", ".", os.sep):
+                  if path in cand:
+                      return path
+                  path = os.path.dirname(path)
+              return None
+
+          cand = collect_candidates()
+          test_re = re.compile(r'(^|/)(tests?|androidTest|fuzz|benchmarks)/')
+          quoted_re = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+          # (owning test tree or None, referenced test trees)
+          blueprints = []
+          for dirpath, dirnames, filenames in os.walk("."):
+              dirnames[:] = [d for d in dirnames
+                             if not d.startswith(".") and d not in SKIP_DIRS]
+              # Not every blueprint is called Android.bp: libcore uses
+              # JavaLibrary.bp, and other trees use *.bp too.  Reading only
+              # Android.bp meant their references were invisible, so libcore's
+              # src/test trees were deleted and core-tests lost its sources --
+              # which surfaces later as "core-tests-prebuilt-dex-from-java:
+              # Installable device module must have LOCAL_SOONG_DEX_JAR set".
+              bps = [f for f in filenames if f.endswith(".bp")]
+              if not bps:
+                  continue
+              owner = deepest_owner(dirpath, cand)
+              text = ""
+              for bp in bps:
+                  try:
+                      with open(os.path.join(dirpath, bp),
+                                encoding="utf-8", errors="replace") as fh:
+                          text += fh.read() + "\n"
+                  except OSError:
+                      continue
+              refs = set()
+              for s in quoted_re.findall(text):
+                  if not test_re.search(s) or s.startswith(":") or "$" in s:
+                      continue
+                  target = os.path.normpath(os.path.join(dirpath, s))
+                  for c in cand:
+                      if target == c or target.startswith(c + os.sep):
+                          refs.add(c)
+              if refs:
+                  blueprints.append((owner, refs))
+
+          # Fixpoint: a blueprint's sources only matter while its own tree
+          # survives.
+          keep = set(ALWAYS_KEEP)
+          changed = True
+          while changed:
+              changed = False
+              for c in cand:
+                  if c not in keep and any(c != k and c.startswith(k + os.sep)
+                                           for k in keep):
+                      keep.add(c)
+                      changed = True
+              for owner, refs in blueprints:
+                  if owner is not None and owner not in keep:
+                      continue
+                  for c in refs:
+                      if c not in keep:
+                          keep.add(c)
+                          changed = True
+
+          # Make-level references are invisible to the blueprint scan because
+          # they are unquoted includes: art/Android.mk has
+          # "include art/test/Android.run-test.mk", so deleting art/test breaks
+          # kati later with "No such file or directory".  Keep any candidate
+          # whose path is mentioned by a .mk file that is itself surviving.
+          mk_blob = []
+          for dirpath, dirnames, filenames in os.walk("."):
+              dirnames[:] = [d for d in dirnames
+                             if not d.startswith(".") and d not in SKIP_DIRS]
+              if deepest_owner(dirpath, cand) is not None:
+                  continue
+              for fn in filenames:
+                  if fn.endswith(".mk"):
+                      try:
+                          with open(os.path.join(dirpath, fn),
+                                    encoding="utf-8", errors="replace") as fh:
+                              mk_blob.append(fh.read())
+                      except OSError:
+                          pass
+          mk_blob = "\n".join(mk_blob)
+          for c in sorted(cand - keep):
+              if c in mk_blob:
+                  keep.add(c)
+
+          # Neither scan sees modules referenced by *name* from Soong's own Go
+          # code: build/soong/selinux_contexts.go does BuiltTool("check_prop_prefix")
+          # and that module lives in system/sepolicy/tests/Android.bp, so the
+          # prune deleted it and ninja died with
+          #   "check_prop_prefix ... missing and no known rule to make it".
+          # Map every module name defined inside a candidate to its tree, then
+          # keep the tree when a surviving blueprint, makefile or Soong plugin
+          # names that module.
+          name_re = re.compile(r'^\s*name:\s*"([^"]+)"', re.M)
+          name_owner = {}
+          for c in cand:
+              if not os.path.isdir(c):
+                  continue
+              for dirpath, dirnames, filenames in os.walk(c):
+                  dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+                  for fn in filenames:
+                      if not fn.endswith(".bp"):
+                          continue
+                      try:
+                          with open(os.path.join(dirpath, fn),
+                                    encoding="utf-8", errors="replace") as fh:
+                              text = fh.read()
+                      except OSError:
+                          continue
+                      for m in name_re.finditer(text):
+                          name_owner.setdefault(m.group(1), c)
+          for dirpath, dirnames, filenames in os.walk("."):
+              dirnames[:] = [d for d in dirnames
+                             if not d.startswith(".") and d not in SKIP_DIRS]
+              if deepest_owner(dirpath, cand) is not None:
+                  continue
+              # Soong plugins live under build/soong both at the root and in
+              # projects that ship their own rule (system/sepolicy/build/soong).
+              parts = os.path.normpath(dirpath).split(os.sep)
+              in_soong = any(parts[i] == "build" and parts[i + 1] == "soong"
+                             for i in range(len(parts) - 1))
+              for fn in filenames:
+                  if not (fn.endswith(".bp") or fn.endswith(".mk") or
+                          (in_soong and fn.endswith(".go"))):
+                      continue
+                  try:
+                      with open(os.path.join(dirpath, fn),
+                                encoding="utf-8", errors="replace") as fh:
+                          text = fh.read()
+                  except OSError:
+                      continue
+                  for tok in quoted_re.findall(text):
+                      owner = name_owner.get(tok)
+                      if owner is not None:
+                          keep.add(owner)
+
+          # Keeping a tree above can protect candidates nested inside it.
+          changed = True
+          while changed:
+              changed = False
+              for c in cand:
+                  if c not in keep and any(c != k and c.startswith(k + os.sep)
+                                           for k in keep):
+                      keep.add(c)
+                      changed = True
+
+          removed = []
+          for c in sorted(cand - keep, key=len, reverse=True):
+              if "aidl_api" in c.split(os.sep):
+                  continue
+              if os.path.isdir(c):
+                  shutil.rmtree(c, ignore_errors=True)
+                  removed.append(c)
+
+          print(f"removed {len(removed)} test-only trees; kept {len(keep)}")
+          for c in sorted(keep):
+              print(f"  kept (needed): {c}")
+          PY
+          echo "Android.bp files remaining: $(find . -name Android.bp -not -path './out/*' | wc -l)"
+          du -sh .
+          df -h /
+
+
       - name: Add swap and tune memory pressure
         run: |
           sudo swapoff -a 2>/dev/null || true
@@ -199,35 +485,41 @@ jobs:
           sudo systemctl stop earlyoom 2>/dev/null || true
           echo "oomd: $(systemctl is-active systemd-oomd 2>/dev/null || echo absent)"
 
-          # Disk swap thrashes badly when soong_build approaches the RAM limit.
-          # Add compressed RAM swap (zram) as the preferred swap device so the
-          # kernel can reclaim anonymous pages without waiting on the runner's
-          # disk.  Keep a smaller disk swap file as a fallback.
+          # Compressed in-RAM swap (zram) is the only swap that keeps up with
+          # soong_build.  A plain disk swapfile at swappiness=10 is what turned
+          # the analysis step into a 30-minute freeze and an exit 143; zram
+          # compresses anonymous pages without waiting on the runner's disk.
           ZRAM=0
-          if sudo modprobe zram 2>/dev/null && [ -b /dev/zram0 ]; then
-            sudo swapoff /dev/zram0 2>/dev/null || true
+          sudo modprobe zram 2>/dev/null || true
+          if [ ! -b /dev/zram0 ]; then
+            # ubuntu-22.04 images ship without the zram module in some builds.
+            sudo apt-get install -y -qq linux-modules-extra-"$(uname -r)" >/dev/null 2>&1 || true
+            sudo modprobe zram 2>/dev/null || true
+          fi
+          if [ -b /dev/zram0 ]; then
             echo 1 | sudo tee /sys/block/zram0/reset >/dev/null 2>&1 || true
-            echo lz4 | sudo tee /sys/block/zram0/comp_algorithm >/dev/null 2>&1 || true
-            echo 8G | sudo tee /sys/block/zram0/disksize >/dev/null 2>&1 || true
+            echo zstd | sudo tee /sys/block/zram0/comp_algorithm >/dev/null 2>&1 || \
+              echo lz4 | sudo tee /sys/block/zram0/comp_algorithm >/dev/null 2>&1 || true
+            echo 12G | sudo tee /sys/block/zram0/disksize >/dev/null 2>&1 || true
             if sudo mkswap /dev/zram0 >/dev/null 2>&1 && sudo swapon -p 100 /dev/zram0; then
               ZRAM=1
-              echo "zram swap enabled: 8G, priority 100"
             fi
           fi
-          if [ "$ZRAM" -eq 0 ]; then
-            echo "::warning::zram is unavailable; falling back to disk swap only"
-          fi
 
-          sudo fallocate -l 12G /swapfile
+          # Disk swap stays as a last-resort overflow, not the primary device.
+          sudo fallocate -l 8G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon -p 10 /swapfile
-          # With zram, anonymous pages can be compressed in RAM instead of
-          # thrashing the disk.  Without it, stay conservative and prefer
-          # dropping caches over swap.
+          # Only be aggressive if the compressed device is actually there.
+          # With zram, "swapping" an anonymous page is a memcpy into RAM, so
+          # 180 is right; on a plain disk swapfile it would thrash the runner
+          # and reproduce the exit-143 freeze this is meant to prevent.
           if [ "$ZRAM" -eq 1 ]; then
-            sudo sysctl -w vm.swappiness=100 || true
+            sudo sysctl -w vm.swappiness=180 || true
+            sudo sysctl -w vm.page-cluster=0 || true
           else
+            echo "::warning::zram unavailable, disk swap only; staying at swappiness=10"
             sudo sysctl -w vm.swappiness=10 || true
           fi
           sudo sysctl -w vm.vfs_cache_pressure=50 || true
@@ -263,17 +555,17 @@ jobs:
           USE_CCACHE: ${{ inputs.ccache || 'true' }}
           ALLOW_MISSING_DEPENDENCIES: 'true'
           MALLOC_ARENA_MAX: '2'
-          # soong_build is the memory peak.  Keep a firm cap well below the
-          # runner's 16 GB, but do not set GOGC=5 or GOMAXPROCS=1: that makes
-          # Go collect constantly and turns the Android.bp analysis into a
-          # 20+ minute silent step, after which the hosted runner is recycled
-          # with exit 143.  A 50% GC target and all four cores are both faster
-          # and use less total memory than swap-thrashing at -j1.
-          GOGC: '50'
-          GOMEMLIMIT: '8GiB'
+          # soong_build's live heap peaks around 12.6 GB on this tree, so any
+          # GOMEMLIMIT below that is not a limit at all: Go just turns the
+          # whole analysis into a GC storm and the runner stops answering
+          # (exit 143).  Leave the GC target at the default and let zram absorb
+          # the overshoot instead.  GOMAXPROCS=2 keeps a core free for the
+          # runner agent's heartbeats.
+          GOGC: '100'
+          GOMAXPROCS: '2'
           BUILD_JOBS: ${{ inputs.jobs || '2' }}
           MAKEFILE_NAME: ${{ inputs.makefile || 'twrp_begonia-bp2a-eng' }}
-          BUILD_TARGET: ${{ inputs.build_target || 'recoveryimage' }}
+          BUILD_TARGET: ${{ inputs.build_target || 'adbd recoveryimage' }}
           BUILD_USERNAME: A_X
           BUILD_HOSTNAME: poxproject
           AERA_BUILD_DEVICE: begonia
@@ -285,33 +577,39 @@ jobs:
           set -o pipefail
           : > build.log
 
-          # Memory/disk sampler.  Stream it into the job log as well as
-          # monitor.log so the last state survives a runner shutdown.
+          # Memory/disk sampler.  Write each sample through tee so it reaches
+          # both monitor.log and the live job log immediately; the previous
+          # tail -f setup buffered its output and often lost the last sample
+          # when the runner was recycled.
           : > monitor.log
           ( set +e
             while :; do
-              echo "=== $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
-              free -h
-              cat /proc/pressure/memory 2>/dev/null
-              df -h "$SRC_DIR" / 2>/dev/null
-              ps -eo pid,rss,pcpu,comm --sort=-rss | head -12
-              # dmesg needs root on the hosted runner; never let it kill the
-              # sampler subshell (set -e is inherited from the step shell).
-              sudo dmesg -T 2>/dev/null | tail -20
+              {
+                echo "=== $(date -u '+%Y-%m-%dT%H:%M:%SZ') ==="
+                free -h
+                cat /proc/pressure/memory 2>/dev/null
+                df -h "$SRC_DIR" / 2>/dev/null
+                ps -eo pid,rss,pcpu,comm --sort=-rss | head -12
+                # dmesg needs root on the hosted runner; never let it kill the
+                # sampler subshell (set -e is inherited from the step shell).
+                sudo dmesg -T 2>/dev/null | tail -20
+              } | stdbuf -oL -eL tee -a monitor.log
               sleep 30
-            done ) > monitor.log 2>&1 &
+            done ) &
           MON_PID=$!
-          stdbuf -oL -eL tail -n +1 -f monitor.log &
-          TAIL_PID=$!
-          echo "monitor pid $MON_PID, tail pid $TAIL_PID -> $SRC_DIR/monitor.log"
+          echo "monitor pid $MON_PID -> $SRC_DIR/monitor.log"
 
-          # Never run more than two compilers on the 16 GB hosted runner.  A
-          # dispatch with jobs=4 still succeeds, it is just clamped here.
+          # Compile parallelism.  Soong's analysis phase (soong_build) peaked at
+          # 13-14 GB in runs #28-#31 and is bounded by GOMAXPROCS=2, not by -j;
+          # this knob only controls ninja once analysis is done, where each
+          # clang is a few hundred MB and 19 GB of swap sits underneath.  The
+          # graph is 27,499 edges, so -j2 cannot finish inside the 350 minute
+          # job timeout.
           JOBS="$BUILD_JOBS"
           case "$JOBS" in ''|*[!0-9]*) JOBS=2 ;; esac
-          if [ "$JOBS" -gt 2 ]; then
-            echo "clamping -j$JOBS to -j2: 16 GB runner OOM/thrash safeguard"
-            JOBS=2
+          if [ "$JOBS" -gt 4 ]; then
+            echo "clamping -j$JOBS to -j4: 4 vCPU runner"
+            JOBS=4
           fi
           echo "make jobs: $JOBS"
 
@@ -323,14 +621,24 @@ jobs:
           tail -n 20 build.log || true
           if [ -z "$ANDROID_BUILD_TOP" ]; then
             echo "::error::envsetup did not initialise ANDROID_BUILD_TOP"
-            kill "$MON_PID" "$TAIL_PID" 2>/dev/null || true
+            kill "$MON_PID" 2>/dev/null || true
             exit 1
           fi
           lunch "$MAKEFILE_NAME"
           set +e
           mka -j"$JOBS" $BUILD_TARGET 2>&1 | tee -a build.log
           RC=${PIPESTATUS[0]}
-          kill "$MON_PID" "$TAIL_PID" 2>/dev/null || true
+          kill "$MON_PID" 2>/dev/null || true
+          if [ "$RC" -ne 0 ]; then
+            echo "===== tail build.log (last 250 lines) ====="
+            tail -n 250 build.log || true
+            echo "===== dmesg (last 80 lines) ====="
+            sudo dmesg -T 2>/dev/null | tail -80 || true
+            echo "===== memory ====="
+            free -h || true
+            echo "===== top rss ====="
+            ps -eo pid,rss,pcpu,comm --sort=-rss 2>/dev/null | head -15 || true
+          fi
           exit "$RC"
 
       - name: ccache stats
