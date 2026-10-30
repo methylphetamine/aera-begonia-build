@@ -119,11 +119,22 @@ shipped (erofs or ext4; /data is ext4/f2fs).
 - Runtime FBE v1/v2 decryption: TWRP parses the installed ROM's vendor fstab
   for `/data` and `/metadata`, so v1, v2 and metadata-encrypted ROMs bring
   their own crypto layout. The `recovery.fstab` userdata lines are only a
-  fallback, and vold is patched to prefer `/etc/additional.fstab` plus check
-  the policy actually present on `/data/misc`. When that policy is v1, vold
-  disables v2-only wrapped keys/`IV_INO_LBLK_32`; when it is v2, the ROM's
-  options are kept. `TW_USE_FSCRYPT_POLICY := 1` only affects libtar backup
-  handling, not decryption.
+  fallback. The AERA builder patches `system/vold/FsCrypt.cpp` with
+  `scripts/patch_vold_dynamic_fbe.py` (the AERA port of OrangeFox's dynamic
+  FBE patch), so vold really prefers `/etc/additional.fstab` and checks the
+  policy present on `/data/misc` instead of trusting the fallback version.
+  A detected v1 policy disables v2-only wrapped keys and
+  `IV_INO_LBLK_32`, and the wrapped-key retry is skipped for v1. vold also
+  creates `/data/misc` and `/data/misc/vold` itself, because recovery mounts
+  `/data` before init has made those parents and `fs_prepare_dir()` only
+  creates the final component.
+- `TW_USE_FSCRYPT_POLICY := 1` is **not** only a backup knob on AERA: it
+  compiles vold and the recovery decrypt code with
+  `USE_FSCRYPT_POLICY_V1` (`vold_defaults.go`), i.e. v1 key descriptors for
+  the CE/DE user keys. It must match the generation that formatted `/data`
+  (v1 for begonia's current data). If `/data` is reformatted by a v2-only
+  ROM, switch it to `2`; the runtime detection above then keeps v2 wrapped
+  keys instead of stripping them.
 - `system.prop` adds `ro.fastbootd.available=true`.
 - Product branding is `Randi` / `Nut 8 Pro`; `pb_begonia.mk` is kept for PBRP builds.
 
